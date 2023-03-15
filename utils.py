@@ -1,125 +1,135 @@
-import numpy as np
-from scipy.spatial.transform import Rotation
+from torchmetrics.classification.accuracy import BinaryAccuracy
+import torch
+import torch.nn as nn
+import torchvision
+import pytorch_lightning as pl
+from torchmetrics.classification import BinaryAccuracy
 
-
-def make_tfm_matrix(tvec, rpy) -> np.ndarray:
-    '''Returns 4x4 random homogeneous transformation matrix
-
-    Arguments
-    ---------
-    tvec : array_like
-        translation vector in 3d
-    rpy : array_like
-        roll pitch yaw in radians
-    '''
-    matrix = np.eye(4)
-    matrix[:3, 3] = tvec
-    matrix[:3, :3] = Rotation.from_euler('xyz', rpy).as_matrix()
-    return matrix
-
-
-def apply_transform(pts, tfm):
-    '''Applies homogenous transform to points
-
-    pts: Nx3 array
-    tfm: 4x4 transformation matrix
-    '''
-    return np.einsum('ij,nj->ni', tfm[:3, :3], pts) + tfm[:3, 3]
-
-
-def make_plane3d(ngrids, scale=1.0, tfm=None):
-    '''
-
-    Arguments
-    ---------
-    ngrids : int
-        number of points along each dimension of plane
-    scale : float
-        scale of the plane
-    scale : np.ndarray, optional
-        4x4 transformation matrix that is applied to the plane
-
-    Returns
-    -------
-    plane : np.ndarray
-        Nx3 array of points that form a plane in 3d space, N=ngrids**2
-    '''
-    # make evenly spaced grid in xy
-    grid = np.mgrid[0:ngrids, 0:ngrids].reshape(2, -1).T
-
-    # add z dimension
-    grid = np.concatenate([grid, np.zeros((grid.shape[0], 1))], 1)
-
-    # scale
-    grid = scale * grid / (ngrids-1)
-
-    if tfm is not None:
-        grid = apply_transform(grid, tfm)
-
-    return grid
-
-
-def within_roi(pc, roi):
-    '''
-    Return new point cloud where all points fit within 3D bounding box
-    (e.g. region of interest)
-
-    Arguments
-    ---------
-    pc : np.ndarray
-        Nx3 array of points
-    roi : np.ndarray
-        3x2 array specifying 3D bounding box (inclusive)
-        ((xmin, xmax), (ymin, ymax), (zmin, zmax))
-
-    Returns
-    -------
-    mask : np.ndarray
-        boolean array indicating which of N points are within roi, shape=(N,)
-    '''
-    mask = np.bitwise_and.reduce([
-        pc[:, 0] >= roi[0, 0],
-        pc[:, 0] <= roi[0, 1],
-        pc[:, 1] >= roi[1, 0],
-        pc[:, 1] <= roi[1, 1],
-        pc[:, 2] >= roi[2, 0],
-        pc[:, 2] <= roi[2, 1],
+# these helper functions will all go in a utils file that gets imported
+def get_flowers_dataloaders(batch_size, train_tfm=None):
+  default_tfm = torchvision.transforms.Compose([
+      torchvision.transforms.Resize(128),
+      torchvision.transforms.RandomCrop(128),
+      torchvision.transforms.ToTensor(),
+      torchvision.transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+  ])
+  if train_tfm is None:
+    train_tfm = default_tfm
+  else:
+    train_tfm = torchvision.transforms.Compose([
+        train_tfm,
+        default_tfm,
     ])
-    return mask
+
+  train_set = torchvision.datasets.Flowers102('./', 
+                                              split='train',
+                                              transform=train_tfm,
+                                              download=True)
+  val_set = torchvision.datasets.Flowers102('./', split='val', 
+                                            transform=default_tfm,
+                                            download=True)
+  train_dl = torch.utils.data.DataLoader(train_set, batch_size, shuffle=True,
+                                         num_workers=2, persistent_workers=True)
+  val_dl = torch.utils.data.DataLoader(val_set, batch_size, shuffle=False,
+                                       num_workers=2, persistent_workers=True)
+  return train_dl, val_dl
+
+def get_voc_dataloaders(batch_size):
+  img_tfm = torchvision.transforms.Compose([
+      torchvision.transforms.Resize((128, 128)),
+      torchvision.transforms.ToTensor(),
+      torchvision.transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+  ])
+  target_tfm = torchvision.transforms.Compose([
+      torchvision.transforms.Resize((128, 128)),
+      torchvision.transforms.PILToTensor(),
+  ])
+
+  train_set = torchvision.datasets.VOCSegmentation('./', year='2008', 
+                                                   image_set='train', 
+                                                   transform=img_tfm,
+                                                   target_transform=target_tfm,
+                                                   download=True)
+  val_set = torchvision.datasets.VOCSegmentation('./', year='2008',
+                                                 image_set='val', 
+                                                 transform=img_tfm,
+                                                 target_transform=target_tfm,
+                                                 download=True)
+  train_dl = torch.utils.data.DataLoader(train_set, batch_size, shuffle=True,
+                                         num_workers=2, persistent_workers=True)
+  val_dl = torch.utils.data.DataLoader(val_set, batch_size, shuffle=False,
+                                       num_workers=2, persistent_workers=True)
+  return train_dl, val_dl
+
+class SegmentationModule(pl.LightningModule):
+  def __init__(self):
+    super().__init__()
+    self.acc_metric = BinaryAccuracy()
+    self.criterion = nn.BCELoss()
+
+  def configure_optimizers(self):
+    optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
+    return optimizer
+    
+  def training_step(self, batch, batch_idx):
+    x, y = batch
+    y[y==255] = 0
+    y[y>0] = 1
+    y_pred = self(x)
+    loss = self.criterion(y_pred, y.float())
+    self.log("train_loss", loss)
+    acc = self.acc_metric(y_pred, y)
+    self.log("train_acc", acc, prog_bar=True)
+    return loss
+
+  def validation_step(self, batch, batch_idx):
+    x, y = batch
+    y[y==255] = 0
+    y[y>0] = 1
+    y_pred = self(x)
+    loss = self.criterion(y_pred, y.float())
+    self.log("val_loss", loss)
+    acc = self.acc_metric(y_pred, y)
+    self.log("val_acc", acc, prog_bar=True)
+    return loss
+
+def check_q1a(model):
+  errors = 0
+  num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+  if num_params != 62378344:
+    print('[ERROR]: Your implementation has incorrect number of trainable parameters')
+    errors += 1
+
+  img = torch.randn((32, 3, 227, 227)).float()
+  out = model(img)
+  if out.shape != (32, 1000):
+    print('[ERROR]: Your implementation produces incorrect output shape')
+    errors +=1 
+  if not torch.allclose(out.sum(-1), torch.ones(img.size(0))):
+    print('[ERROR]: Your implementation does not produce valid logits')
+  
+  if errors == 0:
+    print('PASSED')
 
 
-def plot_plane(ax, normal, center):
-    '''Plots plane in 3D
-    '''
-    xx, yy = np.meshgrid(np.linspace(-1, 1, 2, endpoint=True),
-                         np.linspace(0, 2, 2, endpoint=True),
-                        )
-    zz = (-normal[0] * xx - normal[1] * yy + center.dot(normal)) / normal[2]
+def check_q1b(model):
+  errors = 0
+  num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+  if num_params != 62378344:
+    print('[ERROR]: Your implementation has incorrect number of trainable parameters')
+    errors += 1
 
-    ax.plot_surface(xx, yy, zz, alpha=0.2, color='g')
+  img = torch.randn((32, 3, 37, 37)).float()
+  out = model(img)
+  try:
+    out = model(img)
+    if out.shape != (32, 1000):
+      print('[ERROR]: Your implementation produces incorrect output shape')
+      errors +=1 
+  except RuntimeError as e:
+    print(e)
+    print('[ERROR]: Your implementation has shape mismatches in forward pass')
+    errors +=1 
 
-
-def plot_sphere(ax, center, radius):
-    '''Plots sphere in 3D
-    '''
-    u, v = np.mgrid[0:2*np.pi:20j, 0:np.pi:10j]
-    x = radius * np.cos(u)*np.sin(v) + center[0]
-    y = radius * np.sin(u)*np.sin(v) + center[1]
-    z = radius * np.cos(v) + center[2]
-    ax.plot_wireframe(x, y, z, color="r", alpha=0.4)
-
-
-def plot_cylinder(ax, center, axis, radius):
-    '''Plots cylinder in 3D
-    '''
-    if axis[2] < 0:
-        axis *= -1
-
-    t = np.linspace(0.0, 0.3, 8)
-    theta = np.linspace(0, 2*np.pi, 20)
-    theta_grid, t_grid = np.meshgrid(theta, t)
-    x = radius * np.cos(theta_grid) + axis[0] * t_grid + center[0]
-    y = radius * np.sin(theta_grid) + axis[1] * t_grid + center[1]
-    z = t_grid * axis[2] + center[2]
-
-    ax.plot_wireframe(x, y, z, color="r", alpha=0.4)
+  if errors == 0:
+    print('PASSED')
