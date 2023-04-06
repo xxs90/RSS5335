@@ -35,7 +35,9 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_path', '-m', type=str, default="grasp_mobilenet.pt",
+    # parser.add_argument('--model_path', '-m', type=str, default="grasp_mobilenet.pt",
+    #                     help='File path where torch model is saved')
+    parser.add_argument('--model_path', '-m', type=str, default="aug_grasp_mobilenet.pt",
                         help='File path where torch model is saved')
     parser.add_argument('--num_grasps', '-n', type=int, default=50,
                         help='number of grasps used to evaluate model performance')

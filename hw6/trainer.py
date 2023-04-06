@@ -61,6 +61,8 @@ class MobileUNet(nn.Module):
             nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
         )
 
+        self.relu = nn.ReLU(True)
+
 
     def forward(self, img: Tensor) -> Tensor:
         '''Perform forward pass to generate logits over pixel location and gripper
@@ -86,7 +88,7 @@ class MobileUNet(nn.Module):
         out2 = self.layer2(x_narrow)
         # print(out1.size())
         # print(out2.size())
-        out = self.layerOut(out1+out2)
+        out = self.layerOut(self.relu(out1+out2))
         # print(out.size())
 
         return out
@@ -189,7 +191,8 @@ def main():
 
         # record checkpoint if val loss is lowest
         if avg_val_loss == np.min(record['val_loss']):
-            model.save('grasp_mobilenet.pt')
+            # model.save('grasp_mobilenet.pt')
+            model.save('aug_grasp_mobilenet.pt')
 
         # logging details
         pbar.set_description(f'loss={avg_val_loss:.2f}')
@@ -200,7 +203,8 @@ def main():
         ax[0].set_title('Train Loss')
         ax[1].plot(record['val_loss'])
         ax[1].set_title('Val. Loss')
-        plt.savefig('loss_curves.png')
+        # plt.savefig('loss_curves.png')
+        plt.savefig('aug_loss_curves.png')
         plt.close()
 
         if epoch_num % PLOT_FREQ == 0:
@@ -220,7 +224,8 @@ def main():
             [a.set_xticklabels([]) for a in ax.flatten()]
             [a.set_yticklabels([]) for a in ax.flatten()]
             plt.suptitle(f'Epoch = {epoch_num}')
-            plt.savefig('predictions.png')
+            # plt.savefig('predictions.png')
+            plt.savefig('aug_predictions.png')
             plt.close()
 
 
